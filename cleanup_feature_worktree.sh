@@ -29,14 +29,16 @@ SAFE_FEATURE_NAME=$(echo "$FEATURE_NAME" | tr '[:upper:]' '[:lower:]' | tr '-' '
 
 WORKTREE_DIR="../${PROJECT_NAME}_${SAFE_FEATURE_NAME}"
 BRANCH_NAME="feature/${SAFE_FEATURE_NAME}"
-CONTAINER_NAME="postgres_${PROJECT_NAME}_${SAFE_FEATURE_NAME}"
+DB_NAME_DEV="${PROJECT_NAME}_${SAFE_FEATURE_NAME}_dev"
+DB_NAME_TEST="${PROJECT_NAME}_${SAFE_FEATURE_NAME}_test"
 
 echo "🧹 Cleaning up feature worktree:"
 echo "  Project: $PROJECT_NAME"
 echo "  Feature: $FEATURE_NAME"
 echo "  Branch: $BRANCH_NAME"
 echo "  Directory: $WORKTREE_DIR"
-echo "  Container: $CONTAINER_NAME"
+echo "  Dev Database: $DB_NAME_DEV"
+echo "  Test Database: $DB_NAME_TEST"
 echo ""
 
 # Ask for confirmation
@@ -47,12 +49,13 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 1
 fi
 
-# Stop and remove Docker container
-if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    echo "🐳 Stopping and removing Docker container..."
-    docker rm -f "$CONTAINER_NAME"
-else
-    echo "ℹ️  Docker container $CONTAINER_NAME not found"
+# Drop databases using Ecto
+if [ -d "$WORKTREE_DIR" ]; then
+    echo "🗄️  Dropping databases..."
+    cd "$WORKTREE_DIR"
+    mix ecto.drop --quiet || echo "ℹ️  Dev database already dropped"
+    MIX_ENV=test mix ecto.drop --quiet || echo "ℹ️  Test database already dropped"
+    cd - > /dev/null
 fi
 
 # Remove worktree
