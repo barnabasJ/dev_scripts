@@ -36,22 +36,20 @@ if [ -z "$BASE_PORT" ]; then
     BASE_PORT=$((16#$HASH % 900 + 4100))
 fi
 
-# Calculate DB port (avoid conflicts with main 5432)
-DB_PORT=$((BASE_PORT + 1000))  # e.g., 4100 -> 5100
 
 WORKTREE_DIR="../${PROJECT_NAME}_${SAFE_FEATURE_NAME}"
-DB_NAME="${PROJECT_NAME}_${SAFE_FEATURE_NAME}_dev"
+DB_NAME_DEV="${PROJECT_NAME}_${SAFE_FEATURE_NAME}_dev"
+DB_NAME_TEST="${PROJECT_NAME}_${SAFE_FEATURE_NAME}_test"
 BRANCH_NAME="feature/${SAFE_FEATURE_NAME}"
-CONTAINER_NAME="postgres_${PROJECT_NAME}_${SAFE_FEATURE_NAME}"
 
 echo "🚀 Setting up new feature worktree:"
 echo "  Project: $PROJECT_NAME"
 echo "  Feature: $FEATURE_NAME"
 echo "  Branch: $BRANCH_NAME"
 echo "  Directory: $WORKTREE_DIR"
-echo "  Database: $DB_NAME (Docker container: $CONTAINER_NAME)"
+echo "  Dev Database: $DB_NAME_DEV"
+echo "  Test Database: $DB_NAME_TEST"
 echo "  Phoenix port: $BASE_PORT"
-echo "  Database port: $DB_PORT"
 echo ""
 
 # Check if worktree already exists
@@ -68,30 +66,12 @@ if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
     exit 1
 fi
 
-# Check if Docker container already exists
-if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    echo "❌ Error: Docker container $CONTAINER_NAME already exists"
-    echo "   Use: docker rm -f $CONTAINER_NAME (to remove)"
-    exit 1
-fi
+# PostgreSQL is assumed to be running on localhost:5432
 
 # Create new branch and worktree
 echo "📁 Creating worktree and branch..."
 git worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR"
 
-# Start PostgreSQL container
-echo "🐳 Starting PostgreSQL container..."
-docker run -d \
-    --name "$CONTAINER_NAME" \
-    -e POSTGRES_USER=postgres \
-    -e POSTGRES_PASSWORD=postgres \
-    -e POSTGRES_DB="$DB_NAME" \
-    -p "$DB_PORT:5432" \
-    postgres:15
-
-# Wait for PostgreSQL to be ready
-echo "⏳ Waiting for PostgreSQL to be ready..."
-timeout 30 bash -c "until docker exec $CONTAINER_NAME pg_isready -U postgres; do sleep 1; done"
 
 # Create custom config files for the worktree
 echo "⚙️  Creating custom configuration..."
@@ -103,16 +83,9 @@ import Config
 # Custom configuration for worktree: $SAFE_FEATURE_NAME
 # This file is gitignored and contains worktree-specific overrides
 
-# Use custom database with Docker
+# Use custom database
 config :${PROJECT_NAME}, ${PROJECT_NAME^}.Repo,
-  username: "postgres",
-  password: "postgres",
-  hostname: "localhost",
-  database: "$DB_NAME",
-  port: $DB_PORT,
-  stacktrace: true,
-  show_sensitive_data_on_connection_error: true,
-  pool_size: 10
+  database: "$DB_NAME_DEV"
 
 # Use custom port to avoid conflicts
 config :${PROJECT_NAME}, ${PROJECT_NAME^}Web.Endpoint,
@@ -123,9 +96,24 @@ config :${PROJECT_NAME}, ${PROJECT_NAME^}Web.Endpoint,
 #   watchers: []
 EOF
 
-# Update .gitignore to include dev.local.exs if not already there
+# Create config/test.local.exs for test environment
+cat > "$WORKTREE_DIR/config/test.local.exs" << EOF
+import Config
+
+# Custom test configuration for worktree: $SAFE_FEATURE_NAME
+# This file is gitignored and contains worktree-specific test overrides
+
+# Use custom test database
+config :${PROJECT_NAME}, ${PROJECT_NAME^}.Repo,
+  database: "$DB_NAME_TEST"
+EOF
+
+# Update .gitignore to include local config files if not already there
 if ! grep -q "config/dev.local.exs" "$WORKTREE_DIR/.gitignore" 2>/dev/null; then
     echo "config/dev.local.exs" >> "$WORKTREE_DIR/.gitignore"
+fi
+if ! grep -q "config/test.local.exs" "$WORKTREE_DIR/.gitignore" 2>/dev/null; then
+    echo "config/test.local.exs" >> "$WORKTREE_DIR/.gitignore"
 fi
 
 # Modify dev.exs to import dev.local.exs
@@ -135,14 +123,24 @@ if ! grep -q "dev.local.exs" "$WORKTREE_DIR/config/dev.exs"; then
     echo 'if File.exists?("config/dev.local.exs"), do: import_config("dev.local.exs")' >> "$WORKTREE_DIR/config/dev.exs"
 fi
 
+# Modify test.exs to import test.local.exs
+if ! grep -q "test.local.exs" "$WORKTREE_DIR/config/test.exs"; then
+    echo "" >> "$WORKTREE_DIR/config/test.exs"
+    echo "# Import worktree-specific test configuration if it exists" >> "$WORKTREE_DIR/config/test.exs"
+    echo 'if File.exists?("config/test.local.exs"), do: import_config("test.local.exs")' >> "$WORKTREE_DIR/config/test.exs"
+fi
+
 # Setup the project
 echo "📦 Setting up project dependencies..."
 cd "$WORKTREE_DIR"
 mix deps.get
 
 # Run database setup
-echo "🔧 Running database migrations..."
+echo "🔧 Setting up databases..."
+mix ecto.create
+MIX_ENV=test mix ecto.create
 mix ash.setup
+MIX_ENV=test mix ash.setup
 
 echo ""
 echo "✅ Worktree setup complete!"
@@ -152,12 +150,11 @@ echo "   cd $WORKTREE_DIR"
 echo "   mix phx.server"
 echo ""
 echo "🌐 Your app will be available at: http://localhost:$BASE_PORT"
-echo "🗄️  Database available at: localhost:$DB_PORT"
 echo ""
 echo "🧹 To clean up later:"
 echo "   ./scripts/cleanup_feature_worktree.sh $SAFE_FEATURE_NAME"
 echo ""
 echo "💡 Tips:"
 echo "   - Use 'git worktree list' to see all active worktrees"
-echo "   - Use 'docker ps' to see running containers"
-echo "   - Container name: $CONTAINER_NAME"
+echo "   - Dev database: $DB_NAME_DEV"
+echo "   - Test database: $DB_NAME_TEST"
